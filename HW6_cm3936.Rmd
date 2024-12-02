@@ -14,6 +14,7 @@ library(p8105.datasets)
 library(tidyverse)
 library(dplyr)
 library(patchwork)
+library(modelr)
 set.seed(1)
 ```
 
@@ -153,6 +154,8 @@ or_plot1 =
     y = "Odds Ratio") +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 90, hjust = 1))  
+
+or_plot1
 ```
 
 Pittsburgh, PA was removed because it was an extreme outlier that prevented the visualization of all the other values. The main insight is that the odds of a crime being solved based on the age, sex, and race of the victim is highest in Boston, Oakland, CA, and Omaha, NE.  
@@ -172,24 +175,47 @@ birthweight=
 
 To create my model, a brief literature search was conducted to understand behavioral factors that impact neonatal outcomes. Findings show that SES factors such as family income impact birthweight, additionally there are differences between racial groups in birthweights so maternal race is important, additionally, behaviors such as drinking and smoking affect birthweight since it they are not healthy or recommended behaviors for pregnant people. Lastly the malformations that impact birthweight are likely important to this model as well. 
 
-Variables In Use: 
-
-bwt: baby’s birth weight (grams)
-fincome: family monthly income (in hundreds, rounded)
-malform: presence of malformations that could affect weight (0 = absent, 1 = present)
-mrace: mother’s race (1 = White, 2 = Black, 3 = Asian, 4 = Puerto Rican, 8 = Other)
-smoken: average number of cigarettes smoked per day during pregnancy
+```{r model comparison}
+birthweigh_model_cmj= lm(bwt ~ mrace + fincome + malform + smoken, data = birthweight)
+birthweight_model_main= lm(bwt ~ blength + gaweeks, data = birthweight)
+birthweight_model_interaction= lm(bwt ~ blength * bhead * babysex, data = birthweight)
 
 
+birthweight |> 
+  gather_predictions(birthweigh_model_cmj, birthweight_model_main, birthweight_model_interaction) |> 
+  mutate(model = fct_inorder(model))
 
+bwt_cv_df =
+  crossv_mc(birthweight, 100) |> 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble))
 
+bwt_cv_df = 
+  bwt_cv_df |> 
+  mutate(
+    birthweigh_model_cmj  = map(train, \(birthweight) lm(bwt ~ mrace + fincome + malform + smoken, data = birthweight)),
+    birthweight_model_main     = map(train, \(birthweight) lm(bwt ~ blength + gaweeks, data = birthweight)),
+    birthweight_model_interaction  = map(train, \(birthweight) lm(bwt ~ blength * bhead * babysex, data = birthweight)))|> 
+  mutate(
+    rmse_cmj = map2_dbl(birthweigh_model_cmj, test, \(mod, birthweight) rmse(model = mod, data = birthweight)),
+    rmse_main    = map2_dbl(birthweight_model_main, test, \(mod, birthweight) rmse(model = mod, data = birthweight)),
+    rmse_interaction = map2_dbl(birthweight_model_interaction, test, \(mod, birthweight) rmse(model = mod, data = birthweight)))
 
+rmse_plot=
+   bwt_cv_df |> 
+  select(starts_with("rmse")) |> 
+  pivot_longer(
+    everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_") |> 
+  mutate(model = fct_inorder(model)) |> 
+  ggplot(aes(x = model, y = rmse)) + geom_violin()
 
+rmse_plot
 
+```
 
-
-
-
-
-
+My model has a higher RMSE values compared to the model with the main effects and the interaction model. Evidently, the interaction model is the best fitting model. 
 
