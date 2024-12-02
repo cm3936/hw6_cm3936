@@ -1,0 +1,195 @@
+---
+title: "HW 6"
+author: "Carolyn Martinez"
+
+date: "2024-11-30"
+output: github_document
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r set up + data}
+library(p8105.datasets)
+library(tidyverse)
+library(dplyr)
+library(patchwork)
+set.seed(1)
+```
+
+
+## Problem 1:Weather Data 
+```{r}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+
+boot_sample = function(df) {
+  sample_frac(df, replace = TRUE)
+}
+
+boot_straps = 
+  tibble(strap_number = 1:5000) |> 
+  mutate(
+    strap_sample = map(strap_number, \(i) boot_sample(df = weather_df))
+  )
+
+bootstrap_results = 
+  boot_straps |> 
+  mutate(
+    models = map(strap_sample, \(df) lm(tmax ~ tmin, data = df)),
+    results = map(models, \(model) {
+      r_squared = broom::glance(model)$r.squared
+      coef_estimates = broom::tidy(model)
+      log_beta0_beta1 = log(coef_estimates$estimate[1] * coef_estimates$estimate[2])
+      tibble(r_squared = r_squared, log_beta0_beta1 = log_beta0_beta1)
+    })
+  ) |> 
+  select(-strap_sample, -models) |> 
+  unnest(results)
+
+quantiler_25 = quantile(bootstrap_results$r_squared, 0.025)
+quantiler_975 = quantile(bootstrap_results$r_squared, 0.975)
+
+quantileb_25 = quantile(bootstrap_results$log_beta0_beta1, 0.025)
+quantileb_975 = quantile(bootstrap_results$log_beta0_beta1, 0.975)
+
+r_squaredplot=
+   ggplot(bootstrap_results, aes(x = r_squared)) +
+  geom_histogram(binwidth = 0.01, fill = "blue", alpha = 0.7) +
+   geom_vline(xintercept = quantiler_25, color = "red", linetype = "dashed", linewidth = 1) +
+  geom_vline(xintercept = quantiler_975, color = "red", linetype = "dashed", linewidth = 1) +
+  labs(
+     title = "Distribution of R-squared", x = "R-squared", y = "Frequency")
+
+beta_plot=
+  ggplot(bootstrap_results, aes(x = log_beta0_beta1)) +
+  geom_histogram(binwidth = 0.01, fill = "blue", alpha = 0.7) +
+   geom_vline(xintercept = quantileb_25, color = "red", linetype = "dashed", linewidth = 1) +
+  geom_vline(xintercept = quantileb_975, color = "red", linetype = "dashed", linewidth = 1) +
+  labs(title = "Distribution of log(beta0 * beta1)", x = "log(beta0 * beta1)", y = "Frequency")
+
+r_squaredplot+beta_plot
+```
+
+The distributions of r-squared and log(beto0 * beta1) seem to be normal and not skewed. The mean of the r-squared distribution is normal around a mean of about `r summary(mean(bootstrap_results$r_squared))` with a CI of (`r quantiler_25`, `r quantiler_975`) and the log(beta0 * beta1) average is `r summary(mean(bootstrap_results$log_beta0_beta1))` with a CI of (`r quantileb_25`, `r quantileb_975`). 
+
+##Problem 2: Washington Homocide Data: 
+
+```{r problem 2}
+homicide_data_filtered=
+   read_csv("./homicide-data.csv",na = c("NA", ".", ""))|>
+   na.omit()|>
+   mutate(
+      city_state = paste(city, state, sep = ", "),
+      victim_age = as.numeric(victim_age),
+      status = recode(disposition, "Closed by arrest" = 1, .default = 0))|>
+   filter(!(city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO","Tulsa, AL")))|>
+   filter(victim_race %in% c("White", "Black"))
+
+status_logreg = 
+   glm(status ~ victim_age + victim_sex + victim_race, data = homicide_data_filtered)
+
+summary(status_logreg)
+
+
+status_logreg |> 
+  broom::tidy() |> 
+  select(term, estimate, std.error, p.value) |> 
+     mutate(
+    odds_ratio = exp(estimate), 
+    ci_lower = exp(estimate - 1.96 * std.error),  
+    ci_upper = exp(estimate + 1.96 * std.error)) |> 
+  select(term, odds_ratio, ci_lower, ci_upper, p.value)
+   
+```
+
+The estimate and confidence interval of the adjusted odds ratio for solving homicides comparing male victims to female victims, keeping all other variables fixed, is 0.884 
+and the confidence interval is (0.872. 0.897).
+
+```{r per city}
+status_logreg_results = 
+  homicide_data_filtered |>
+  group_by(city_state) |>
+  nest() |> 
+  mutate(
+    model = map(data, ~ glm(status ~ victim_age + victim_sex + victim_race, 
+                            data = ., 
+                            family = binomial)),
+    tidy_model = map(model, broom::tidy),
+    odds_ratios = map(tidy_model, ~ .x |> 
+                        filter(term != "(Intercept)") |> 
+                        mutate(
+                          odds_ratio = exp(estimate),
+                          ci_lower = exp(estimate - 1.96 * std.error),
+                          ci_upper = exp(estimate + 1.96 * std.error)
+                        ) |> 
+                        select(term, odds_ratio, ci_lower, ci_upper, p.value))
+  ) |> 
+  unnest(odds_ratios)|>
+arrange(desc(odds_ratio))|>
+ filter(!(city_state %in% c("Pittsburgh, PA")))|>
+  arrange(desc(odds_ratio)) 
+
+or_plot1 =
+   ggplot(status_logreg_results, aes(x = city_state, y = odds_ratio)) +
+  geom_bar(stat = "identity", fill = "blue", alpha = 0.7) +
+  geom_errorbar(
+    aes(ymin = ci_lower, ymax = ci_upper),
+    width = 0.1,
+    color = "black"
+  ) +
+  labs(
+    title = "Estimated Odds Ratios and 95% Confidence Intervals by City",
+    x = "City State",
+    y = "Odds Ratio") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))  
+```
+
+Pittsburgh, PA was removed because it was an extreme outlier that prevented the visualization of all the other values. The main insight is that the odds of a crime being solved based on the age, sex, and race of the victim is highest in Boston, Oakland, CA, and Omaha, NE.  
+
+##Problem 3: Birthweight
+
+```{r birthweight}
+
+birthweight=
+   read_csv("./birthweight.csv",na = c("NA", ".", ""))|>
+   na.omit(bwt)|>
+   mutate(
+      malform=as.factor(malform),
+      mrace=as.factor(mrace))
+   
+```
+
+To create my model, a brief literature search was conducted to understand behavioral factors that impact neonatal outcomes. Findings show that SES factors such as family income impact birthweight, additionally there are differences between racial groups in birthweights so maternal race is important, additionally, behaviors such as drinking and smoking affect birthweight since it they are not healthy or recommended behaviors for pregnant people. Lastly the malformations that impact birthweight are likely important to this model as well. 
+
+Variables In Use: 
+
+bwt: baby’s birth weight (grams)
+fincome: family monthly income (in hundreds, rounded)
+malform: presence of malformations that could affect weight (0 = absent, 1 = present)
+mrace: mother’s race (1 = White, 2 = Black, 3 = Asian, 4 = Puerto Rican, 8 = Other)
+smoken: average number of cigarettes smoked per day during pregnancy
+
+
+
+
+
+
+
+
+
+
+
+
+
+
